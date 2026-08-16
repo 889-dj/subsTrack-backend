@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+# drizzle/meta/ holds the migration journal + snapshots — required
+# for `drizzle-kit migrate` on a fresh clone, so it is committed.
+*.log
+.DS_Store

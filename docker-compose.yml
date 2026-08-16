@@ -1,0 +1,38 @@
+# Local development stack. For day-to-day dev you usually only need Postgres:
+#   docker compose up -d db
+# then `npm run dev` on the host (hot reload). `docker compose up` runs the
+# full stack in containers.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: substrack
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d substrack"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/substrack
+      PORT: 8080
+      NODE_ENV: development
+      # Set these before first boot — see .env.example:
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+      CLERK_WEBHOOK_SECRET: ${CLERK_WEBHOOK_SECRET:-}
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
