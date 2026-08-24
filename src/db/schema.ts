@@ -1,4 +1,18 @@
-import { index, pgTable, text, timestamp, uuid, numeric, varchar, uniqueIndex } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  check,
+  index,
+  integer,
+  numeric,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+  varchar,
+} from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { BILLING_CYCLES, SUBSCRIPTION_STATUSES } from '../constants.js';
 
 /**
@@ -47,15 +61,22 @@ export const subscriptions = pgTable(
   (t) => [
     index('subscriptions_user_id_idx').on(t.userId),
     index('subscriptions_next_renewal_date_idx').on(t.nextRenewalDate),
+    index('subscriptions_user_status_renewal_idx').on(t.userId, t.status, t.nextRenewalDate),
+    check('subscriptions_cost_positive', sql`${t.cost} > 0`),
+    check('subscriptions_billing_cycle_check', sql`${t.billingCycle} in ('monthly', 'yearly')`),
+    check('subscriptions_status_check', sql`${t.status} in ('active', 'paused', 'cancelled')`),
+    check(
+      'subscriptions_currency_check',
+      sql`${t.currency} in ('INR', 'USD', 'EUR', 'GBP', 'AED', 'SGD', 'AUD', 'CAD', 'JPY')`,
+    ),
   ],
 );
 
 /**
- * Real charge history — the replacement for the client-side
- * `synthesizePaymentHistory()` (per docs/backend-prd.md §5/§7). Rows are
- * materialized from each subscription's cadence on create/update (see
- * src/billing.ts) so the detail screen has real history immediately; the
- * unique (subscription_id, charged_at) pair keeps backfills idempotent.
+ * Legacy table retained for migration compatibility. The current product has
+ * no verified transaction feed, so it does not insert inferred rows here or
+ * expose them as payment history. Forecasts are computed separately and are
+ * explicitly labelled as estimates by the API.
  */
 export const payments = pgTable(
   'payments',
@@ -76,9 +97,72 @@ export const payments = pgTable(
   ],
 );
 
+/** Durable idempotency and diagnostics for at-least-once webhook delivery. */
+export const webhookEvents = pgTable(
+  'webhook_events',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    provider: varchar('provider', { length: 24 }).notNull(),
+    providerEventId: text('provider_event_id').notNull(),
+    eventType: text('event_type').notNull(),
+    payloadHash: varchar('payload_hash', { length: 64 }).notNull(),
+    status: varchar('status', { length: 16 }).default('received').notNull(),
+    attempts: integer('attempts').default(1).notNull(),
+    lastError: text('last_error'),
+    receivedAt: timestamp('received_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    processedAt: timestamp('processed_at', { withTimezone: true, mode: 'date' }),
+  },
+  (t) => [uniqueIndex('webhook_events_provider_event_idx').on(t.provider, t.providerEventId)],
+);
+
+/** Server-side projection of RevenueCat's authoritative entitlement state. */
+export const entitlements = pgTable(
+  'entitlements',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    entitlementId: text('entitlement_id').notNull(),
+    isActive: boolean('is_active').default(false).notNull(),
+    productId: text('product_id'),
+    store: text('store'),
+    environment: text('environment'),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }),
+    originalAppUserId: text('original_app_user_id'),
+    sourceEventAt: timestamp('source_event_at', { withTimezone: true, mode: 'date' }).notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.entitlementId] })],
+);
+
+/**
+ * Durable deletion outbox. It has no user FK so it survives local identity
+ * deletion until Clerk and RevenueCat are both cleaned up.
+ */
+export const deletionJobs = pgTable(
+  'deletion_jobs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: text('user_id').notNull(),
+    status: varchar('status', { length: 16 }).default('pending').notNull(),
+    attempts: integer('attempts').default(0).notNull(),
+    lastError: text('last_error'),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('deletion_jobs_user_id_idx').on(t.userId),
+    index('deletion_jobs_status_next_attempt_idx').on(t.status, t.nextAttemptAt),
+  ],
+);
+
 export type UserRow = typeof users.$inferSelect;
 export type NewUserRow = typeof users.$inferInsert;
 export type SubscriptionRow = typeof subscriptions.$inferSelect;
 export type NewSubscriptionRow = typeof subscriptions.$inferInsert;
 export type PaymentRow = typeof payments.$inferSelect;
 export type NewPaymentRow = typeof payments.$inferInsert;
+export type WebhookEventRow = typeof webhookEvents.$inferSelect;
+export type EntitlementRow = typeof entitlements.$inferSelect;
+export type DeletionJobRow = typeof deletionJobs.$inferSelect;

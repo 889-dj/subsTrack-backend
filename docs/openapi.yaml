@@ -1,0 +1,345 @@
+openapi: 3.1.0
+info:
+  title: subsTrack API
+  version: 1.0.0
+  description: Production contract for the current subsTrack mobile application.
+servers:
+  - url: https://api.substrack.app/v1
+security:
+  - clerkBearer: []
+paths:
+  /meta:
+    get:
+      security: []
+      summary: Supported app constants
+      responses:
+        '200':
+          description: API version, currencies, and categories
+  /me:
+    get:
+      summary: Current account
+      responses:
+        '200':
+          description: Authenticated profile and entitlement projection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /subscriptions:
+    get:
+      summary: List owned subscriptions
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [active, paused, all]
+            default: all
+      responses:
+        '200':
+          description: Complete subscription collection
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Subscription'
+                  nextCursor:
+                    type: [string, 'null']
+    post:
+      summary: Track a subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionInput'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /subscriptions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionId'
+    get:
+      summary: Read one owned subscription
+      responses:
+        '200':
+          description: Subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      summary: Update one owned subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionPatch'
+      responses:
+        '200':
+          description: Updated subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+    delete:
+      summary: Stop tracking a subscription
+      responses:
+        '204':
+          description: Deleted
+  /subscriptions/{id}/pause:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionId'
+    post:
+      summary: Exclude a subscription from active totals and forecasts
+      responses:
+        '200':
+          description: Paused subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+  /subscriptions/{id}/resume:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionId'
+    post:
+      summary: Resume a paused subscription
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                nextRenewalDate:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          description: Active subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+  /subscriptions/{id}/forecast-occurrences:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionId'
+      - in: query
+        name: months
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 60
+          default: 12
+    get:
+      summary: Estimated future occurrences; not verified payment history
+      responses:
+        '200':
+          description: Forecast occurrences
+  /analytics/spend-trend:
+    get:
+      summary: Renewal forecast grouped strictly by currency
+      parameters:
+        - in: query
+          name: months
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 24
+            default: 6
+        - in: query
+          name: currency
+          schema:
+            type: string
+            minLength: 3
+            maxLength: 3
+      responses:
+        '200':
+          description: Per-currency series
+  /analytics/overview:
+    get:
+      summary: Commitment, comparison, and category summaries by currency
+      responses:
+        '200':
+          description: Overview analytics
+  /account:
+    delete:
+      summary: Permanently delete the authenticated account and owned data
+      responses:
+        '204':
+          description: Access revoked and deletion completed or durably scheduled
+components:
+  securitySchemes:
+    clerkBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    SubscriptionId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    User:
+      type: object
+      required: [id, email, isPro, proUntil, createdAt]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        isPro:
+          type: boolean
+        proUntil:
+          type: [string, 'null']
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+    SubscriptionInput:
+      type: object
+      unevaluatedProperties: false
+      required: [name, cost, currency, billingCycle, nextRenewalDate]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        cost:
+          type: number
+          exclusiveMinimum: 0
+        currency:
+          type: string
+          enum: [INR, USD, EUR, GBP, AED, SGD, AUD, CAD, JPY]
+        billingCycle:
+          type: string
+          enum: [monthly, yearly]
+        nextRenewalDate:
+          type: string
+          format: date-time
+        category:
+          type: string
+          maxLength: 100
+        source:
+          type: string
+          maxLength: 100
+        plan:
+          type: string
+          maxLength: 100
+        note:
+          type: string
+          maxLength: 1000
+    SubscriptionPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        cost:
+          type: number
+          exclusiveMinimum: 0
+        currency:
+          type: string
+          enum: [INR, USD, EUR, GBP, AED, SGD, AUD, CAD, JPY]
+        billingCycle:
+          type: string
+          enum: [monthly, yearly]
+        nextRenewalDate:
+          type: string
+          format: date-time
+        category:
+          type: string
+          maxLength: 100
+        source:
+          type: string
+          maxLength: 100
+        plan:
+          type: string
+          maxLength: 100
+        note:
+          type: string
+          maxLength: 1000
+    Subscription:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/SubscriptionInput'
+        - type: object
+          required: [id, status, createdAt, updatedAt]
+          properties:
+            id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum: [active, paused]
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+    Error:
+      type: object
+      required: [message, code, requestId]
+      properties:
+        message:
+          type: string
+        code:
+          type: string
+          enum:
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - NOT_FOUND
+            - VALIDATION_ERROR
+            - CONFLICT
+            - RATE_LIMITED
+            - ENTITLEMENT_REQUIRED
+            - INTERNAL_ERROR
+        requestId:
+          type: string
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+  responses:
+    Unauthenticated:
+      description: Missing or invalid Clerk session
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Missing or not owned
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

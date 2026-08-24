@@ -1,6 +1,7 @@
 import { buildApp } from './app.js';
 import { env } from './config.js';
 import { connection } from './db/client.js';
+import { processPendingDeletionJobs } from './services/account-deletion.js';
 
 async function main(): Promise<void> {
   const app = buildApp();
@@ -14,11 +15,19 @@ async function main(): Promise<void> {
   // container/network namespace.
   await app.listen({ host: '0.0.0.0', port: env.PORT });
 
+  void processPendingDeletionJobs(app.log);
+  const deletionTimer = setInterval(
+    () => void processPendingDeletionJobs(app.log),
+    env.DELETION_RETRY_INTERVAL_MS,
+  );
+  deletionTimer.unref();
+
   // Graceful shutdown — stop accepting connections, let in-flight requests
   // finish, then close the pool so the orchestrator sees a clean exit.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     app.log.info({ signal }, 'Shutting down');
     try {
+      clearInterval(deletionTimer);
       await app.close();
       await connection.end();
       process.exit(0);

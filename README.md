@@ -2,7 +2,9 @@
 
 Production-grade Node.js backend for the subsTrack mobile app — **Fastify + TypeScript + Drizzle (PostgreSQL) + Clerk auth**.
 
-The full API contract lives in [`docs/backend-prd.md`](../subsTrack/docs/backend-prd.md) (in the subsTrack repo).
+The product/backend contract lives in [`docs/backend-prd.md`](../subsTrack/docs/backend-prd.md)
+(in the app repo). The machine-readable HTTP contract is
+[`docs/openapi.yaml`](docs/openapi.yaml).
 
 ## Stack
 
@@ -25,7 +27,7 @@ src/
   config.ts           env parsing (fail-fast on boot) + .env loading
   constants.ts        currencies / billing cycles / categories / statuses
   db/
-    schema.ts         users + subscriptions tables
+    schema.ts         users, subscriptions, entitlements, webhook/outbox tables
     client.ts         postgres-js connection pool + drizzle instance
   middleware/auth.ts  Clerk Bearer-token verification (request.userId)
   routes/
@@ -33,6 +35,11 @@ src/
     me.ts             GET /v1/me
     subscriptions.ts  full CRUD (ownership enforced in SQL)
     webhooks.ts       POST /api/webhooks/clerk (svix-signed)
+    revenuecat.ts     idempotent RevenueCat entitlement projection
+  services/
+    clerk.ts          just-in-time local user reconciliation
+    webhook-events.ts durable webhook idempotency
+    account-deletion.ts retriable Clerk + RevenueCat erasure
 ```
 
 ## Local setup
@@ -60,6 +67,20 @@ npm run dev
 ```
 
 The server listens on **http://localhost:8080**.
+
+The mobile app's `EXPO_PUBLIC_API_URL` must include the version prefix, for
+example `http://localhost:8080/v1` on a reachable development host.
+
+## Validation
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
+
+Tests cover calendar-month and leap-year renewal arithmetic, paused-item
+exclusion, zero-baseline comparisons, and strict currency separation.
 
 ## Test runbook
 
@@ -102,12 +123,13 @@ curl -H "Authorization: Bearer <session-token>" \
 | PATCH | `/v1/subscriptions/:id` | ✔ | Partial update |
 | POST | `/v1/subscriptions/:id/pause` | ✔ | Pause (sets `status='paused'`) |
 | POST | `/v1/subscriptions/:id/resume` | ✔ | Resume (sets `status='active'`) |
-| GET | `/v1/subscriptions/:id/payments` | ✔ | Charge history (backfilled on create/update) |
-| GET | `/v1/analytics/spend-trend` | ✔ | Last 12 months of spend `{ months, totals }` |
+| GET | `/v1/subscriptions/:id/forecast-occurrences` | ✔ | Future estimated schedule, explicitly not payment history |
+| GET | `/v1/analytics/spend-trend` | ✔ | Per-currency renewal forecast series |
+| GET | `/v1/analytics/overview` | ✔ | Per-currency commitment and comparison summary |
 | DELETE | `/v1/subscriptions/:id` | ✔ | Delete (204) |
-| DELETE | `/v1/account` | ✔ | Delete account + all data (fires Clerk `user.delete`) |
-| POST | `/api/webhooks/clerk` | svix-signed | User create/update/delete sync |
-| POST | `/api/webhooks/revenuecat` | Bearer-signed | Pro entitlement sync (`users.pro_until`) |
+| DELETE | `/v1/account` | ✔ | Revoke access and durably erase local, Clerk, and RevenueCat data |
+| POST | `/api/webhooks/clerk` | svix-signed | Idempotent user create/update/delete sync |
+| POST | `/api/webhooks/revenuecat` | Bearer-signed | Idempotent Pro entitlement projection |
 
 ## Deploy
 
@@ -121,10 +143,10 @@ docker compose up -d --build
 Recommended for $0: **Oracle Cloud Always Free ARM VM (2 OCPU / 12 GB) + Coolify** (open-source PaaS) — Coolify builds from this Dockerfile, provisions TLS via Caddy, and watches `/readyz`. Same image runs on Fly.io, Railway, Render, or a $5 VPS if you'd rather not self-manage. See `docs/backend-prd.md` for the full rationale.
 
 Deploy checklist:
-1. Set real `CLERK_SECRET_KEY`, `CLERK_WEBHOOK_SECRET`, `DATABASE_URL`, `CORS_ORIGINS`.
+1. Set every production variable from `.env.example`, including Clerk and both RevenueCat secrets.
 2. Point Clerk's webhook at `https://<your-domain>/api/webhooks/clerk`.
 3. Run migrations against prod (`npm run db:migrate` with prod `DATABASE_URL`).
-4. Wire the mobile app: `EXPO_PUBLIC_API_URL=https://<your-domain>` + switch to the Clerk flow (`EXPO_PUBLIC_USE_MOCK_API=false`).
+4. Wire the mobile app: `EXPO_PUBLIC_API_URL=https://<your-domain>/v1`, add its Clerk publishable key, and set `EXPO_PUBLIC_USE_MOCK_API=false`.
 
 ## Scripts
 
@@ -133,6 +155,7 @@ npm run dev            # tsx watch (hot reload)
 npm run build          # tsc -> dist/
 npm start              # node dist/index.js
 npm run typecheck      # tsc --noEmit
+npm test               # calendar and analytics regression tests
 npm run db:generate    # new migration from schema changes
 npm run db:migrate     # apply migrations
 npm run db:studio      # Drizzle Studio (DB browser)

@@ -1,9 +1,16 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { users } from '../db/schema.js';
+import { entitlements, users } from '../db/schema.js';
 import { env } from '../config.js';
+import { sendError } from '../errors.js';
+import {
+  claimWebhookEvent,
+  markWebhookFailed,
+  markWebhookProcessed,
+  payloadHash,
+} from '../services/webhook-events.js';
 
 /**
  * RevenueCat webhook — keeps `users.pro_until` (the server-side copy of the
@@ -14,7 +21,7 @@ import { env } from '../config.js';
  *
  * Event semantics:
  *   grant  (INITIAL_PURCHASE, RENEWAL, UNCANCELLATION, PRODUCT_CHANGE,
- *           NON_RENEWING_PURCHASE, TRANSFER, SUBSCRIPTION_EXTENDED)
+ *           NON_RENEWING_PURCHASE, SUBSCRIPTION_EXTENDED)
  *          -> set pro_until = expiration_at_ms
  *   revoke (EXPIRATION) -> clear pro_until
  *   everything else (CANCELLATION, BILLING_ISSUE, SUBSCRIPTION_PAUSED, ...)
@@ -32,14 +39,21 @@ const GRANT_EVENTS = new Set([
   'RENEWAL',
   'UNCANCELLATION',
   'PRODUCT_CHANGE',
-  'TRANSFER',
   'SUBSCRIPTION_EXTENDED',
 ]);
 
 interface RevenueCatEvent {
+  id?: string;
   type?: string;
   app_user_id?: string;
+  original_app_user_id?: string;
+  aliases?: string[];
+  entitlement_ids?: string[];
   expiration_at_ms?: number;
+  event_timestamp_ms?: number;
+  product_id?: string;
+  store?: string;
+  environment?: string;
 }
 
 const configured = Boolean(env.REVENUECAT_WEBHOOK_SECRET);
@@ -55,13 +69,19 @@ export async function revenueCatRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/webhooks/revenuecat', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!configured) {
       request.log.warn('REVENUECAT_WEBHOOK_SECRET not configured — rejecting webhook');
-      return reply.code(500).send({ message: 'Webhook verification is not configured.' });
+      return sendError(
+        request,
+        reply,
+        500,
+        'INTERNAL_ERROR',
+        'Webhook verification is not configured.',
+      );
     }
 
     const header = request.headers.authorization;
     const token = header?.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
     if (!token || !safeEqual(token, env.REVENUECAT_WEBHOOK_SECRET!)) {
-      return reply.code(401).send({ message: 'Invalid webhook signature.' });
+      return sendError(request, reply, 401, 'UNAUTHENTICATED', 'Invalid webhook signature.');
     }
 
     // v1 nests everything under `event`; Webhooks 2.0 keeps `type` at the top
@@ -72,38 +92,107 @@ export async function revenueCatRoutes(app: FastifyInstance): Promise<void> {
     const type = event?.type ?? raw?.type;
     const appUserId = event?.app_user_id;
     const expirationMs = event?.expiration_at_ms;
+    const eventId = event?.id;
+    const rawBody = request.rawBody;
 
-    // Ack unknown/no-owner payloads — RevenueCat retries on non-2xx, so a
-    // 204 on noise (TEST events, unknown user) is correct: nothing to do.
-    if (!appUserId) return reply.code(204).send();
+    if (!eventId || !type || !rawBody) {
+      return sendError(request, reply, 400, 'VALIDATION_ERROR', 'Invalid RevenueCat event.');
+    }
 
-    let proUntil: Date | null;
-    if (GRANT_EVENTS.has(type ?? '')) {
-      proUntil = expirationMs ? new Date(expirationMs) : null;
-    } else if (type === 'EXPIRATION') {
-      proUntil = null;
-    } else {
-      // CANCELLATION / BILLING_ISSUE / SUBSCRIPTION_PAUSED etc. — entitlement
-      // is still active, so leave pro_until untouched.
+    const claimed = await claimWebhookEvent({
+      provider: 'revenuecat',
+      providerEventId: eventId,
+      eventType: type,
+      payloadHash: payloadHash(rawBody),
+    });
+    if (!claimed) return reply.code(204).send();
+
+    try {
+      if (!appUserId || (event.entitlement_ids && !event.entitlement_ids.includes('pro'))) {
+        await markWebhookProcessed('revenuecat', eventId);
+        return reply.code(204).send();
+      }
+
+      let isActive: boolean;
+      let proUntil: Date | null;
+      if (GRANT_EVENTS.has(type)) {
+        isActive = true;
+        proUntil = expirationMs ? new Date(expirationMs) : null;
+      } else if (type === 'EXPIRATION') {
+        isActive = false;
+        proUntil = null;
+      } else {
+        await markWebhookProcessed('revenuecat', eventId);
+        return reply.code(204).send();
+      }
+
+      const candidates = [...new Set([
+        appUserId,
+        event.original_app_user_id,
+        ...(event.aliases ?? []),
+      ].filter((value): value is string => Boolean(value)))];
+      const matches = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, candidates));
+      const userId = matches.find((item) => item.id === appUserId)?.id ?? matches[0]?.id;
+
+      if (!userId) {
+        request.log.warn({ type }, 'RevenueCat event for unknown user — ignored');
+        await markWebhookProcessed('revenuecat', eventId);
+        return reply.code(204).send();
+      }
+
+      const sourceEventAt = new Date(event.event_timestamp_ms ?? Date.now());
+      const existing = await db.query.entitlements.findFirst({
+        where: and(
+          eq(entitlements.userId, userId),
+          eq(entitlements.entitlementId, 'pro'),
+        ),
+      });
+      if (existing && existing.sourceEventAt > sourceEventAt) {
+        await markWebhookProcessed('revenuecat', eventId);
+        return reply.code(204).send();
+      }
+
+      await db.transaction(async (tx) => {
+        await tx
+          .insert(entitlements)
+          .values({
+            userId,
+            entitlementId: 'pro',
+            isActive,
+            productId: event.product_id,
+            store: event.store,
+            environment: event.environment,
+            expiresAt: proUntil,
+            originalAppUserId: event.original_app_user_id,
+            sourceEventAt,
+          })
+          .onConflictDoUpdate({
+            target: [entitlements.userId, entitlements.entitlementId],
+            set: {
+              isActive,
+              productId: event.product_id,
+              store: event.store,
+              environment: event.environment,
+              expiresAt: proUntil,
+              originalAppUserId: event.original_app_user_id,
+              sourceEventAt,
+              updatedAt: new Date(),
+            },
+          });
+        await tx
+          .update(users)
+          .set({ proUntil, updatedAt: new Date() })
+          .where(eq(users.id, userId));
+      });
+
+      await markWebhookProcessed('revenuecat', eventId);
       return reply.code(204).send();
+    } catch (error) {
+      await markWebhookFailed('revenuecat', eventId, error);
+      throw error;
     }
-
-    const updated = await db
-      .update(users)
-      .set({ proUntil, updatedAt: new Date() })
-      .where(eq(users.id, appUserId))
-      .returning({ id: users.id });
-
-    if (updated.length === 0) {
-      // app_user_id is the Clerk sub; no row means the Clerk webhook hasn't
-      // created the user yet (or they deleted their account). Log, don't
-      // create a row — we can't fabricate the email.
-      request.log.warn(
-        { userId: appUserId, type },
-        'RevenueCat event for unknown user — ignored',
-      );
-    }
-
-    return reply.code(204).send();
   });
 }

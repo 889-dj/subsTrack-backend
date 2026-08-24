@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { users } from '../db/schema.js';
+import { entitlements, users } from '../db/schema.js';
+import { sendError } from '../errors.js';
 import { currentUser, requireAuth } from '../middleware/auth.js';
 
 export async function meRoutes(app: FastifyInstance): Promise<void> {
@@ -10,15 +11,27 @@ export async function meRoutes(app: FastifyInstance): Promise<void> {
     const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
 
     if (!user || user.deletedAt) {
-      // Session is valid but we don't know the user (missed webhook, or
-      // deleted). Treat as not found rather than silently creating a row.
-      return reply.code(404).send({ message: 'User not found.' });
+      return sendError(request, reply, 404, 'NOT_FOUND', 'User not found.');
     }
+
+    const entitlement = await db.query.entitlements.findFirst({
+      where: and(
+        eq(entitlements.userId, userId),
+        eq(entitlements.entitlementId, 'pro'),
+      ),
+    });
+    const entitlementActive = Boolean(
+      entitlement?.isActive &&
+      (!entitlement.expiresAt || entitlement.expiresAt.getTime() > Date.now()),
+    );
+    const legacyActive = Boolean(user.proUntil && user.proUntil.getTime() > Date.now());
 
     return {
       id: user.id,
       email: user.email,
-      isPro: user.proUntil !== null && user.proUntil.getTime() > Date.now(),
+      isPro: entitlementActive || legacyActive,
+      proUntil: entitlement?.expiresAt?.toISOString() ?? user.proUntil?.toISOString() ?? null,
+      createdAt: user.createdAt.toISOString(),
     };
   });
 }

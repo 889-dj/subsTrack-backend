@@ -1,0 +1,4 @@
+ALTER TABLE "subscriptions" ADD CONSTRAINT "subscriptions_cost_positive" CHECK ("subscriptions"."cost" > 0);--> statement-breakpoint
+ALTER TABLE "subscriptions" ADD CONSTRAINT "subscriptions_billing_cycle_check" CHECK ("subscriptions"."billing_cycle" in ('monthly', 'yearly'));--> statement-breakpoint
+ALTER TABLE "subscriptions" ADD CONSTRAINT "subscriptions_status_check" CHECK ("subscriptions"."status" in ('active', 'paused', 'cancelled'));--> statement-breakpoint
+ALTER TABLE "subscriptions" ADD CONSTRAINT "subscriptions_currency_check" CHECK ("subscriptions"."currency" in ('INR', 'USD', 'EUR', 'GBP', 'AED', 'SGD', 'AUD', 'CAD', 'JPY'));

@@ -1,5 +1,6 @@
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 import { ZodError } from 'zod';
 import { env } from './config.js';
 import { accountRoutes } from './routes/account.js';
@@ -18,6 +19,7 @@ export function buildApp(): FastifyInstance {
   const app = Fastify({
     logger: {
       level: env.LOG_LEVEL,
+      redact: ['req.headers.authorization', 'req.headers.cookie'],
       // Pretty logs in dev, structured JSON in prod (Coolify collects stdout).
       ...(env.NODE_ENV === 'development' && { transport: { target: 'pino-pretty' } }),
     },
@@ -30,14 +32,24 @@ export function buildApp(): FastifyInstance {
   // Required for the Expo web build (browser fetch enforces CORS). Native apps
   // ignore it. Restrict with CORS_ORIGINS in production.
   app.register(cors, {
-    origin: env.CORS_ORIGINS ? env.CORS_ORIGINS.split(',') : true,
+    origin: env.CORS_ORIGINS
+      ? env.CORS_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean)
+      : env.NODE_ENV !== 'production',
+  });
+
+  app.register(rateLimit, {
+    global: true,
+    max: env.RATE_LIMIT_MAX,
+    timeWindow: env.RATE_LIMIT_WINDOW,
   });
 
   // Parse JSON as a Buffer so webhook signature verification (svix) can read
   // the exact bytes, while handlers still receive a parsed object via body.
-  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) => {
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (request, body, done) => {
     try {
-      done(null, body.length ? JSON.parse(body.toString('utf8')) : {});
+      const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body);
+      request.rawBody = rawBody;
+      done(null, rawBody.length ? JSON.parse(rawBody.toString('utf8')) : {});
     } catch (err) {
       done(err as Error, undefined);
     }
@@ -47,13 +59,45 @@ export function buildApp(): FastifyInstance {
   // so validation failures must surface as { message } with a 4xx status.
   app.setErrorHandler((err: FastifyError, request, reply) => {
     if (err instanceof ZodError) {
+      const fields = Object.fromEntries(
+        err.issues
+          .filter((issue) => issue.path.length > 0)
+          .map((issue) => [issue.path.join('.'), issue.message]),
+      );
       return reply.code(400).send({
         message: err.errors[0]?.message ?? 'Invalid input.',
+        code: 'VALIDATION_ERROR',
+        requestId: request.id,
+        ...(Object.keys(fields).length > 0 ? { fields } : {}),
       });
     }
-    request.log.error({ err }, 'Unhandled error');
     const status = err.statusCode ?? 500;
-    return reply.code(status).send({ message: err.message });
+    if (status >= 500) request.log.error({ err }, 'Unhandled error');
+    const code = status === 401
+      ? 'UNAUTHENTICATED'
+      : status === 403
+        ? 'FORBIDDEN'
+        : status === 404
+          ? 'NOT_FOUND'
+          : status === 409
+            ? 'CONFLICT'
+            : status === 429
+              ? 'RATE_LIMITED'
+              : status >= 500
+                ? 'INTERNAL_ERROR'
+                : 'VALIDATION_ERROR';
+    return reply.code(status).send({
+      message: status >= 500 ? 'An unexpected server error occurred.' : err.message,
+      code,
+      requestId: request.id,
+    });
+  });
+
+  app.addHook('onSend', async (request, reply, payload) => {
+    reply.header('x-request-id', request.id);
+    reply.header('x-content-type-options', 'nosniff');
+    if (request.url.startsWith('/v1/')) reply.header('cache-control', 'no-store');
+    return payload;
   });
 
   app.register(healthRoutes);

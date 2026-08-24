@@ -1,52 +1,86 @@
-import { db } from './db/client.js';
-import { payments, type SubscriptionRow } from './db/schema.js';
+import type { SubscriptionRow } from './db/schema.js';
 
 /**
- * Charge-history math shared by the payments backfill and the spend-trend
- * endpoint. Matches the mobile client's `synthesizePaymentHistory()`
- * (src/utils/subscriptions.ts in the subsTrack app): charges step back from
- * `nextRenewalDate` by the billing interval (30 / 365 days), and only dates
- * that are already in the past count as history. Two bounds the client
- * doesn't need but we do:
- *   - createdAt: the subscription didn't exist before it was created, so no
- *     charges can predate it.
- *   - cap: a decade-old monthly sub would otherwise materialize 120+ rows;
- *     the detail screen only ever shows a handful.
+ * Calendar-safe subscription arithmetic. A month is not 30 days and a year
+ * is not 365 days. Calculations use UTC because PostgreSQL returns absolute
+ * instants; the app stores renewal selections at a stable local time.
  */
 
-const DAY = 24 * 60 * 60 * 1000;
-const PAYMENT_CAP = 240;
+const ITERATION_CAP = 600;
+
+export type BillingCycle = SubscriptionRow['billingCycle'];
+
+export function addBillingCycles(
+  input: Date,
+  cycle: BillingCycle,
+  count: number,
+): Date {
+  const result = new Date(input);
+  const originalDay = result.getUTCDate();
+  const months = (cycle === 'yearly' ? 12 : 1) * count;
+
+  result.setUTCDate(1);
+  result.setUTCMonth(result.getUTCMonth() + months);
+  const lastDay = new Date(
+    Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+  result.setUTCDate(Math.min(originalDay, lastDay));
+  return result;
+}
+
+export function addBillingCycle(
+  input: Date,
+  cycle: BillingCycle,
+  direction: 1 | -1 = 1,
+): Date {
+  return addBillingCycles(input, cycle, direction);
+}
+
+export function monthKey(date: Date): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+export function startOfUtcMonth(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+export function scheduledOccurrences(
+  sub: Pick<SubscriptionRow, 'nextRenewalDate' | 'billingCycle'>,
+  startInclusive: Date,
+  endExclusive: Date,
+): Date[] {
+  const anchor = new Date(sub.nextRenewalDate);
+  let step = 0;
+  let renewal = new Date(anchor);
+  let guard = 0;
+
+  while (renewal >= endExclusive && guard < ITERATION_CAP) {
+    step -= 1;
+    renewal = addBillingCycles(anchor, sub.billingCycle, step);
+    guard += 1;
+  }
+  while (renewal < startInclusive && guard < ITERATION_CAP) {
+    step += 1;
+    renewal = addBillingCycles(anchor, sub.billingCycle, step);
+    guard += 1;
+  }
+
+  const occurrences: Date[] = [];
+  while (renewal < endExclusive && guard < ITERATION_CAP) {
+    if (renewal >= startInclusive) occurrences.push(new Date(renewal));
+    step += 1;
+    renewal = addBillingCycles(anchor, sub.billingCycle, step);
+    guard += 1;
+  }
+  return occurrences;
+}
 
 export function chargeTimestamps(sub: {
   createdAt: Date;
   nextRenewalDate: Date;
-  billingCycle: SubscriptionRow['billingCycle'];
+  billingCycle: BillingCycle;
 }): number[] {
-  const intervalMs = sub.billingCycle === 'yearly' ? 365 * DAY : 30 * DAY;
-  const next = sub.nextRenewalDate.getTime();
-  const since = sub.createdAt.getTime();
-  const now = Date.now();
-
-  const stamps: number[] = [];
-  // First charge is one interval before the next renewal, then step back.
-  for (let t = next - intervalMs; t >= since && stamps.length < PAYMENT_CAP; t -= intervalMs) {
-    if (t <= now) stamps.push(t);
-  }
-  return stamps;
-}
-
-/**
- * Materialize past charges for a subscription into the `payments` table.
- * Idempotent: the unique (subscription_id, charged_at) constraint means
- * re-running (e.g. after an edit) never duplicates or rewrites history.
- */
-export async function backfillPayments(sub: SubscriptionRow): Promise<void> {
-  const rows = chargeTimestamps(sub).map((t) => ({
-    subscriptionId: sub.id,
-    amount: sub.cost,
-    currency: sub.currency,
-    chargedAt: new Date(t),
-  }));
-  if (rows.length === 0) return;
-  await db.insert(payments).values(rows).onConflictDoNothing();
+  return scheduledOccurrences(sub, sub.createdAt, new Date(Date.now() + 1)).map(
+    (date) => date.getTime(),
+  );
 }

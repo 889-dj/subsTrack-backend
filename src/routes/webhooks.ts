@@ -4,6 +4,13 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { users } from '../db/schema.js';
 import { env } from '../config.js';
+import { sendError } from '../errors.js';
+import {
+  claimWebhookEvent,
+  markWebhookFailed,
+  markWebhookProcessed,
+  payloadHash,
+} from '../services/webhook-events.js';
 
 /**
  * Clerk webhook — keeps the `users` table in sync with Clerk's identity store.
@@ -39,14 +46,25 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/webhooks/clerk', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!webhook) {
       request.log.warn('CLERK_WEBHOOK_SECRET not configured — rejecting webhook');
-      return reply.code(500).send({ message: 'Webhook verification is not configured.' });
+      return sendError(
+        request,
+        reply,
+        500,
+        'INTERNAL_ERROR',
+        'Webhook verification is not configured.',
+      );
+    }
+
+    const rawBody = request.rawBody;
+    const eventId = request.headers['svix-id'] as string | undefined;
+    if (!rawBody || !eventId) {
+      return sendError(request, reply, 400, 'VALIDATION_ERROR', 'Missing signed webhook body.');
     }
 
     let event: ClerkUserEvent;
     try {
       event = webhook.verify(
-        // src/app.ts parses JSON as a Buffer so the exact bytes are available.
-        request.rawBody?.toString('utf8') ?? '',
+        rawBody.toString('utf8'),
         {
           'svix-id': (request.headers['svix-id'] as string) ?? '',
           'svix-timestamp': (request.headers['svix-timestamp'] as string) ?? '',
@@ -54,33 +72,48 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
         },
       ) as ClerkUserEvent;
     } catch {
-      return reply.code(401).send({ message: 'Invalid webhook signature.' });
+      return sendError(request, reply, 401, 'UNAUTHENTICATED', 'Invalid webhook signature.');
     }
 
     const { type, data } = event;
+    const claimed = await claimWebhookEvent({
+      provider: 'clerk',
+      providerEventId: eventId,
+      eventType: type,
+      payloadHash: payloadHash(rawBody),
+    });
+    if (!claimed) return reply.code(204).send();
 
-    if (type === 'user.deleted' || data.deleted) {
+    try {
+      if (type === 'user.deleted' || data.deleted) {
+        await db
+          .update(users)
+          .set({ deletedAt: new Date(), updatedAt: new Date() })
+          .where(eq(users.id, data.id));
+        await markWebhookProcessed('clerk', eventId);
+        return reply.code(204).send();
+      }
+
+      const email = data.email_addresses?.[0]?.email_address;
+      if (!email) {
+        request.log.warn({ userId: data.id }, 'Clerk event without an email — ignored');
+        await markWebhookProcessed('clerk', eventId);
+        return reply.code(204).send();
+      }
+
       await db
-        .update(users)
-        .set({ deletedAt: new Date(), updatedAt: new Date() })
-        .where(eq(users.id, data.id));
+        .insert(users)
+        .values({ id: data.id, email })
+        .onConflictDoUpdate({
+          target: users.id,
+          set: { email, updatedAt: new Date() },
+        });
+
+      await markWebhookProcessed('clerk', eventId);
       return reply.code(204).send();
+    } catch (error) {
+      await markWebhookFailed('clerk', eventId, error);
+      throw error;
     }
-
-    const email = data.email_addresses?.[0]?.email_address;
-    if (!email) {
-      request.log.warn({ userId: data.id }, 'Clerk event without an email — ignored');
-      return reply.code(204).send();
-    }
-
-    await db
-      .insert(users)
-      .values({ id: data.id, email })
-      .onConflictDoUpdate({
-        target: users.id,
-        set: { email, updatedAt: new Date() },
-      });
-
-    return reply.code(204).send();
   });
 }

@@ -1,6 +1,8 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { verifyToken } from '@clerk/backend';
 import { env } from '../config.js';
+import { sendError } from '../errors.js';
+import { ensureLocalUser } from '../services/clerk.js';
 
 /**
  * Clerk session verification. The mobile app sends the Clerk session token as
@@ -35,29 +37,60 @@ declare module 'fastify' {
 export async function requireAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const header = request.headers.authorization;
   if (!header?.startsWith('Bearer ')) {
-    await reply.code(401).send({ message: 'Missing bearer token.' });
+    await sendError(request, reply, 401, 'UNAUTHENTICATED', 'Missing bearer token.');
     return;
   }
 
   if (!configured) {
     request.log.warn('Rejecting authenticated request: CLERK_SECRET_KEY is not configured');
-    await reply.code(500).send({ message: 'Authentication is not configured on this server.' });
+    await sendError(
+      request,
+      reply,
+      500,
+      'INTERNAL_ERROR',
+      'Authentication is not configured on this server.',
+    );
+    return;
+  }
+
+  let sub: string;
+  try {
+    const verified = await verifyToken(header.slice('Bearer '.length), {
+      secretKey: env.CLERK_SECRET_KEY,
+      jwtKey: env.CLERK_JWT_KEY || undefined,
+      audience: env.CLERK_AUDIENCE || undefined,
+      authorizedParties: env.CLERK_AUTHORIZED_PARTIES
+        ?.split(',')
+        .map((value) => value.trim())
+        .filter(Boolean),
+    });
+    if (!verified.sub) {
+      await sendError(request, reply, 401, 'UNAUTHENTICATED', 'Invalid token.');
+      return;
+    }
+    sub = verified.sub;
+  } catch (err) {
+    request.log.warn(
+      { errorName: err instanceof Error ? err.name : 'Unknown' },
+      'Token verification failed',
+    );
+    await sendError(request, reply, 401, 'UNAUTHENTICATED', 'Invalid or expired token.');
     return;
   }
 
   try {
-    const { sub } = await verifyToken(header.slice('Bearer '.length), {
-      secretKey: env.CLERK_SECRET_KEY,
-      jwtKey: env.CLERK_JWT_KEY || undefined,
-    });
-    if (!sub) {
-      await reply.code(401).send({ message: 'Invalid token.' });
+    const state = await ensureLocalUser(sub);
+    if (state === 'deleted') {
+      await sendError(request, reply, 403, 'FORBIDDEN', 'This account has been deleted.');
       return;
     }
     request.userId = sub;
   } catch (err) {
-    request.log.warn({ err }, 'Token verification failed');
-    await reply.code(401).send({ message: 'Invalid or expired token.' });
+    request.log.error(
+      { errorName: err instanceof Error ? err.name : 'Unknown' },
+      'Authenticated user reconciliation failed',
+    );
+    await sendError(request, reply, 500, 'INTERNAL_ERROR', 'Could not load the authenticated account.');
   }
 }
 

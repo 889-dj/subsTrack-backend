@@ -1,11 +1,12 @@
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/client.js';
-import { payments, subscriptions, type SubscriptionRow } from '../db/schema.js';
+import { subscriptions, type SubscriptionRow } from '../db/schema.js';
 import { currentUser, requireAuth } from '../middleware/auth.js';
-import { backfillPayments } from '../billing.js';
+import { scheduledOccurrences } from '../billing.js';
 import { BILLING_CYCLES, CURRENCIES } from '../constants.js';
+import { sendError } from '../errors.js';
 
 /**
  * CRUD for the only core resource. Shapes match the mobile client's
@@ -17,18 +18,36 @@ import { BILLING_CYCLES, CURRENCIES } from '../constants.js';
  */
 
 const subscriptionInput = z.object({
-  name: z.string().trim().min(1, 'Give it a name.').max(100),
-  cost: z.number().positive('Enter what it charges.').max(1_000_000_000),
+  name: z.string().trim().min(1, 'Give it a name.').max(120),
+  cost: z
+    .number()
+    .positive('Enter what it charges.')
+    .max(1_000_000_000)
+    .refine(
+      (value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-8,
+      'Use no more than two decimal places.',
+    ),
   currency: z.enum(CURRENCIES, { message: 'Unsupported currency.' }),
   billingCycle: z.enum(BILLING_CYCLES),
   nextRenewalDate: z.string().datetime({ offset: true }),
-  category: z.string().trim().max(50).optional(),
-  source: z.string().trim().max(50).optional(),
-  plan: z.string().trim().max(50).optional(),
-  note: z.string().trim().max(500).optional(),
-});
+  category: z.string().trim().max(100).optional(),
+  source: z.string().trim().max(100).optional(),
+  plan: z.string().trim().max(100).optional(),
+  note: z.string().trim().max(1_000).optional(),
+}).strict();
 
-const subscriptionUpdate = subscriptionInput.partial();
+const subscriptionUpdate = subscriptionInput
+  .partial()
+  .refine((value) => Object.keys(value).length > 0, 'Provide at least one field to update.');
+const listQuery = z.object({
+  status: z.enum(['active', 'paused', 'all']).default('all'),
+}).strict();
+const forecastQuery = z.object({
+  months: z.coerce.number().int().min(1).max(60).default(12),
+}).strict();
+const resumeInput = z.object({
+  nextRenewalDate: z.string().datetime({ offset: true }).optional(),
+}).strict();
 
 type SubscriptionInput = z.infer<typeof subscriptionInput>;
 
@@ -45,6 +64,9 @@ function toApi(row: SubscriptionRow) {
     source: row.source ?? undefined,
     plan: row.plan ?? undefined,
     note: row.note ?? undefined,
+    // Legacy cancelled rows are non-renewing and surface as paused without
+    // rewriting historical data during migration.
+    status: row.status === 'cancelled' ? 'paused' : row.status,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -53,14 +75,20 @@ function toApi(row: SubscriptionRow) {
 export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
   const scoped = (userId: string) => eq(subscriptions.userId, userId);
 
-  // List — no pagination: small per-user dataset and every tab needs it whole.
+  // List — no pagination yet: every tab needs the complete small collection.
   app.get('/v1/subscriptions', { preHandler: requireAuth }, async (request) => {
+    const { status } = listQuery.parse(request.query);
+    const conditions = [scoped(currentUser(request))];
+    if (status === 'active') conditions.push(eq(subscriptions.status, 'active'));
+    if (status === 'paused') {
+      conditions.push(inArray(subscriptions.status, ['paused', 'cancelled']));
+    }
     const rows = await db
       .select()
       .from(subscriptions)
-      .where(scoped(currentUser(request)))
-      .orderBy(desc(subscriptions.createdAt));
-    return rows.map(toApi);
+      .where(and(...conditions))
+      .orderBy(asc(subscriptions.nextRenewalDate), asc(subscriptions.name));
+    return { items: rows.map(toApi), nextCursor: null };
   });
 
   app.post(
@@ -73,8 +101,6 @@ export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
         .insert(subscriptions)
         .values({ ...input, nextRenewalDate: new Date(input.nextRenewalDate), userId })
         .returning();
-      // Materialize past charges so the payments endpoint has real history.
-      await backfillPayments(row!);
       return reply.code(201).send(toApi(row!));
     },
   );
@@ -90,7 +116,9 @@ export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
         .where(and(eq(subscriptions.id, id), scoped(currentUser(request))))
         .limit(1);
 
-      if (!row[0]) return reply.code(404).send({ message: 'Subscription not found.' });
+      if (!row[0]) {
+        return sendError(request, reply, 404, 'NOT_FOUND', 'Subscription not found.');
+      }
       return toApi(row[0]);
     },
   );
@@ -116,42 +144,41 @@ export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
         .where(and(eq(subscriptions.id, id), scoped(userId)))
         .returning();
 
-      if (!row) return reply.code(404).send({ message: 'Subscription not found.' });
-      // Re-derive history after an edit — new charges may be in the past now,
-      // and existing rows are kept (idempotent via the unique constraint).
-      await backfillPayments(row);
+      if (!row) {
+        return sendError(request, reply, 404, 'NOT_FOUND', 'Subscription not found.');
+      }
       return toApi(row);
     },
   );
 
-  // Payment history for the detail screen — the real replacement for the
-  // client's synthesizePaymentHistory(). Ownership is enforced by looking the
-  // subscription up scoped to the user first.
+  // Forecast occurrences are inferred from cadence. They are deliberately not
+  // called payments because the server has not observed a real transaction.
   app.get(
-    '/v1/subscriptions/:id/payments',
+    '/v1/subscriptions/:id/forecast-occurrences',
     { preHandler: requireAuth },
     async (request, reply) => {
       const { id } = request.params as { id: string };
+      const { months } = forecastQuery.parse(request.query);
       const userId = currentUser(request);
-      const sub = await db
-        .select({ id: subscriptions.id })
+      const [sub] = await db
+        .select()
         .from(subscriptions)
         .where(and(eq(subscriptions.id, id), scoped(userId)))
         .limit(1);
-      if (!sub[0]) return reply.code(404).send({ message: 'Subscription not found.' });
+      if (!sub) {
+        return sendError(request, reply, 404, 'NOT_FOUND', 'Subscription not found.');
+      }
 
-      const rows = await db
-        .select()
-        .from(payments)
-        .where(eq(payments.subscriptionId, id))
-        .orderBy(desc(payments.chargedAt))
-        .limit(50);
-      return rows.map((p) => ({
-        id: p.id,
-        date: p.chargedAt.toISOString(),
-        amount: p.amount,
-        currency: p.currency,
+      const start = new Date();
+      const end = new Date(start);
+      end.setUTCMonth(end.getUTCMonth() + months);
+      const items = scheduledOccurrences(sub, start, end).map((date) => ({
+        date: date.toISOString(),
+        amount: sub.cost.toFixed(2),
+        currency: sub.currency,
+        estimated: true,
       }));
+      return { items };
     },
   );
 
@@ -168,7 +195,9 @@ export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
         .set({ status: 'paused', updatedAt: new Date() })
         .where(and(eq(subscriptions.id, id), scoped(currentUser(request))))
         .returning();
-      if (!row) return reply.code(404).send({ message: 'Subscription not found.' });
+      if (!row) {
+        return sendError(request, reply, 404, 'NOT_FOUND', 'Subscription not found.');
+      }
       return toApi(row);
     },
   );
@@ -178,12 +207,21 @@ export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: requireAuth },
     async (request, reply) => {
       const { id } = request.params as { id: string };
+      const input = resumeInput.parse(request.body ?? {});
       const [row] = await db
         .update(subscriptions)
-        .set({ status: 'active', updatedAt: new Date() })
+        .set({
+          status: 'active',
+          ...(input.nextRenewalDate
+            ? { nextRenewalDate: new Date(input.nextRenewalDate) }
+            : {}),
+          updatedAt: new Date(),
+        })
         .where(and(eq(subscriptions.id, id), scoped(currentUser(request))))
         .returning();
-      if (!row) return reply.code(404).send({ message: 'Subscription not found.' });
+      if (!row) {
+        return sendError(request, reply, 404, 'NOT_FOUND', 'Subscription not found.');
+      }
       return toApi(row);
     },
   );
@@ -198,7 +236,9 @@ export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
         .where(and(eq(subscriptions.id, id), scoped(currentUser(request))))
         .returning({ id: subscriptions.id });
 
-      if (deleted.length === 0) return reply.code(404).send({ message: 'Subscription not found.' });
+      if (deleted.length === 0) {
+        return sendError(request, reply, 404, 'NOT_FOUND', 'Subscription not found.');
+      }
       return reply.code(204).send();
     },
   );

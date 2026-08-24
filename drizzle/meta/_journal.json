@@ -15,6 +15,20 @@
       "when": 1786881637546,
       "tag": "0001_cooing_zaran",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787590244420,
+      "tag": "0002_dazzling_hiroim",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787590709880,
+      "tag": "0003_fluffy_mysterio",
+      "breakpoints": true
     }
   ]
 }
