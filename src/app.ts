@@ -21,7 +21,9 @@ export function buildApp(): FastifyInstance {
       level: env.LOG_LEVEL,
       redact: ['req.headers.authorization', 'req.headers.cookie'],
       // Pretty logs in dev, structured JSON in prod (Coolify collects stdout).
-      ...(env.NODE_ENV === 'development' && { transport: { target: 'pino-pretty' } }),
+      ...(env.NODE_ENV === 'development' && env.LOG_PRETTY && {
+        transport: { target: 'pino-pretty' },
+      }),
     },
     // Behind Coolify/Caddy — needed for correct client IPs in logs/rate limiting.
     trustProxy: true,

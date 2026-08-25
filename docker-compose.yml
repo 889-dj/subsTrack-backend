@@ -1,7 +1,26 @@
 # Local development stack. For day-to-day dev you usually only need Postgres:
 #   docker compose up -d db
 # then `npm run dev` on the host (hot reload). `docker compose up` runs the
-# full stack in containers.
+# full stack in containers, including database migrations.
+x-api-environment: &api-environment
+  DATABASE_URL: postgres://postgres:postgres@db:5432/substrack
+  PORT: 8080
+  NODE_ENV: development
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # The production image omits the optional pretty-printer.
+  LOG_PRETTY: "false"
+  CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+  CLERK_JWT_KEY: ${CLERK_JWT_KEY:-}
+  CLERK_AUTHORIZED_PARTIES: ${CLERK_AUTHORIZED_PARTIES:-}
+  CLERK_AUDIENCE: ${CLERK_AUDIENCE:-}
+  CLERK_WEBHOOK_SECRET: ${CLERK_WEBHOOK_SECRET:-}
+  REVENUECAT_WEBHOOK_SECRET: ${REVENUECAT_WEBHOOK_SECRET:-}
+  REVENUECAT_SECRET_API_KEY: ${REVENUECAT_SECRET_API_KEY:-}
+  CORS_ORIGINS: ${CORS_ORIGINS:-}
+  RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+  RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-1 minute}
+  DELETION_RETRY_INTERVAL_MS: ${DELETION_RETRY_INTERVAL_MS:-60000}
+
 services:
   db:
     image: postgres:16-alpine
@@ -19,20 +38,30 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment: *api-environment
+    command: ["node", "dist/db/migrate.js"]
+    restart: "no"
+
   api:
     build: .
     depends_on:
       db:
         condition: service_healthy
-    environment:
-      DATABASE_URL: postgres://postgres:postgres@db:5432/substrack
-      PORT: 8080
-      NODE_ENV: development
-      # Set these before first boot — see .env.example:
-      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
-      CLERK_WEBHOOK_SECRET: ${CLERK_WEBHOOK_SECRET:-}
+      migrate:
+        condition: service_completed_successfully
+    environment: *api-environment
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
 volumes:
   pgdata:

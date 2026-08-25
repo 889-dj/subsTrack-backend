@@ -44,7 +44,14 @@ src/
 
 ## Local setup
 
-Prereqs: Node ≥ 22, Docker Desktop (running), a [Clerk](https://dashboard.clerk.com) app.
+Docker is optional. Choose the complete instructions in
+[`docs/running.md`](docs/running.md):
+
+| Mode | Database | API runtime |
+|---|---|---|
+| No Docker | Neon or another hosted PostgreSQL | Node 22 on your machine |
+| Hybrid | PostgreSQL 16 in Docker | Node 22 with hot reload |
+| Full Docker | PostgreSQL 16 in Docker | API image + automatic migration service |
 
 ```bash
 # 1. Install deps (already done if you cloned with node_modules)
@@ -56,7 +63,7 @@ cp .env.example .env
 #    CLERK_WEBHOOK_SECRET=whsec_... (dashboard -> Webhooks -> create endpoint)
 #    DATABASE_URL can stay default (matches docker-compose)
 
-# 3. Start Postgres (Docker Desktop must be running first!)
+# 3. Start Postgres (or replace DATABASE_URL with a Neon pooled URL)
 docker compose up -d db
 
 # 4. Create tables
@@ -140,7 +147,10 @@ The app is a plain container — deploy anywhere:
 docker compose up -d --build
 ```
 
-Recommended for $0: **Oracle Cloud Always Free ARM VM (2 OCPU / 12 GB) + Coolify** (open-source PaaS) — Coolify builds from this Dockerfile, provisions TLS via Caddy, and watches `/readyz`. Same image runs on Fly.io, Railway, Render, or a $5 VPS if you'd rather not self-manage. See `docs/backend-prd.md` for the full rationale.
+For a free preview, use the checked-in `render.yaml` with a Neon PostgreSQL
+database. Render's free service can sleep when idle, so move to an always-on
+plan before treating it as production. The same image can also run on Coolify
+or any provider that accepts a Dockerfile.
 
 Deploy checklist:
 1. Set every production variable from `.env.example`, including Clerk and both RevenueCat secrets.
@@ -154,9 +164,11 @@ Deploy checklist:
 npm run dev            # tsx watch (hot reload)
 npm run build          # tsc -> dist/
 npm start              # node dist/index.js
+npm run start:with-migrations # migrate, then start (hosting)
 npm run typecheck      # tsc --noEmit
 npm test               # calendar and analytics regression tests
 npm run db:generate    # new migration from schema changes
 npm run db:migrate     # apply migrations
+npm run db:migrate:runtime # apply migrations from the compiled image
 npm run db:studio      # Drizzle Studio (DB browser)
 ```

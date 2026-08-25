@@ -11,6 +11,10 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(8080),
   LOG_LEVEL: z.string().default('info'),
+  LOG_PRETTY: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
   // Optional so the skeleton boots for local dev before Clerk is set up;
   // authenticated routes refuse requests with a clear error until it is.
   CLERK_SECRET_KEY: z.string().optional(),
