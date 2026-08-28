@@ -54,6 +54,10 @@ export const subscriptions = pgTable(
     source: text('source'),
     plan: text('plan'),
     note: text('note'),
+    // Resolved once at create/rename time (see src/logo.ts) rather than
+    // derived on every read — keeps GET fast and independent of a third
+    // party's uptime. Null for rows created before this column existed.
+    logoUrl: text('logo_url'),
     status: text('status', { enum: SUBSCRIPTION_STATUSES }).default('active').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),

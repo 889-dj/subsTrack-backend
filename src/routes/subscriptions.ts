@@ -7,7 +7,7 @@ import { currentUser, requireAuth } from '../middleware/auth.js';
 import { scheduledOccurrences } from '../billing.js';
 import { BILLING_CYCLES, CURRENCIES } from '../constants.js';
 import { sendError } from '../errors.js';
-import { buildLogoUrl } from '../logo.js';
+import { resolveLogoUrl } from '../logo.js';
 
 /**
  * CRUD for the only core resource. Shapes match the mobile client's
@@ -61,7 +61,7 @@ function toApi(row: SubscriptionRow) {
     currency: row.currency,
     billingCycle: row.billingCycle,
     nextRenewalDate: row.nextRenewalDate.toISOString(),
-    logoUrl: buildLogoUrl(row.name),
+    logoUrl: row.logoUrl ?? undefined,
     category: row.category ?? undefined,
     source: row.source ?? undefined,
     plan: row.plan ?? undefined,
@@ -99,9 +99,15 @@ export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const input = subscriptionInput.parse(request.body);
       const userId = currentUser(request);
+      const logoUrl = await resolveLogoUrl(input.name);
       const [row] = await db
         .insert(subscriptions)
-        .values({ ...input, nextRenewalDate: new Date(input.nextRenewalDate), userId })
+        .values({
+          ...input,
+          nextRenewalDate: new Date(input.nextRenewalDate),
+          userId,
+          logoUrl,
+        })
         .returning();
       return reply.code(201).send(toApi(row!));
     },
@@ -135,12 +141,14 @@ export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
       // zod parses nextRenewalDate to a string; the timestamp column wants a
       // Date, so pull it out of the spread and convert it explicitly.
       const { nextRenewalDate, ...rest } = input;
+      const logoUrl = rest.name ? await resolveLogoUrl(rest.name) : undefined;
 
       const [row] = await db
         .update(subscriptions)
         .set({
           ...rest,
           ...(nextRenewalDate ? { nextRenewalDate: new Date(nextRenewalDate) } : {}),
+          ...(rest.name ? { logoUrl } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(subscriptions.id, id), scoped(userId)))
