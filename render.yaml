@@ -26,6 +26,8 @@ services:
         sync: false
       - key: REVENUECAT_SECRET_API_KEY
         sync: false
+      - key: LOGO_DEV_TOKEN
+        sync: false
       - key: CORS_ORIGINS
         sync: false
       - key: RATE_LIMIT_MAX

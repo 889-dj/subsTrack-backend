@@ -13,7 +13,7 @@
     "start": "node dist/index.js",
     "start:with-migrations": "npm run db:migrate:runtime && npm start",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test src/billing.test.ts src/analytics.test.ts src/app.test.ts",
+    "test": "node --import tsx --test src/billing.test.ts src/analytics.test.ts src/app.test.ts src/logo.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:runtime": "node dist/db/migrate.js",

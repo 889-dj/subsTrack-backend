@@ -27,6 +27,9 @@ const envSchema = z.object({
   CLERK_WEBHOOK_SECRET: z.string().optional(),
   REVENUECAT_WEBHOOK_SECRET: z.string().optional(),
   REVENUECAT_SECRET_API_KEY: z.string().optional(),
+  // Optional logo.dev publishable token for subscription logos. Unset falls
+  // back to Google's key-free favicon service (lower resolution).
+  LOGO_DEV_TOKEN: z.string().optional(),
   // Comma-separated allowed origins for the Expo web build. Empty = allow all
   // (dev); set to your domain(s) in production.
   CORS_ORIGINS: z.string().optional(),

@@ -7,6 +7,7 @@ import { currentUser, requireAuth } from '../middleware/auth.js';
 import { scheduledOccurrences } from '../billing.js';
 import { BILLING_CYCLES, CURRENCIES } from '../constants.js';
 import { sendError } from '../errors.js';
+import { buildLogoUrl } from '../logo.js';
 
 /**
  * CRUD for the only core resource. Shapes match the mobile client's
@@ -60,6 +61,7 @@ function toApi(row: SubscriptionRow) {
     currency: row.currency,
     billingCycle: row.billingCycle,
     nextRenewalDate: row.nextRenewalDate.toISOString(),
+    logoUrl: buildLogoUrl(row.name),
     category: row.category ?? undefined,
     source: row.source ?? undefined,
     plan: row.plan ?? undefined,
