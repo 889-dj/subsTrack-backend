@@ -8,6 +8,9 @@ test('known brand aliases resolve to their real domain, including plan variants'
   assert.equal(deriveDomain('YouTube Premium'), 'youtube.com');
   assert.equal(deriveDomain('Disney+'), 'disneyplus.com');
   assert.equal(deriveDomain('Amazon Prime Video'), 'amazon.com');
+  assert.equal(deriveDomain('Prime Video'), 'primevideo.com');
+  assert.equal(deriveDomain('Prime'), 'primevideo.com');
+  assert.equal(deriveDomain('Amazon Prime'), 'amazon.com');
 });
 
 test('unknown names fall back to a slugified .com guess', () => {

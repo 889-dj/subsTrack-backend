@@ -10,7 +10,10 @@ const KNOWN_DOMAINS: Record<string, string> = {
   netflix: 'netflix.com',
   spotify: 'spotify.com',
   'amazon prime': 'amazon.com',
-  'prime video': 'amazon.com',
+  'prime video': 'primevideo.com',
+  // Bare "Prime" is ambiguous (shopping membership vs. the streaming app),
+  // but in a subscription tracker it almost always means Prime Video.
+  prime: 'primevideo.com',
   'disney+': 'disneyplus.com',
   disneyplus: 'disneyplus.com',
   'youtube premium': 'youtube.com',
