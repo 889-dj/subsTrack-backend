@@ -1,5 +1,6 @@
 import { addBillingCycle, monthKey, scheduledOccurrences, startOfUtcMonth } from './billing.js';
 import type { SubscriptionRow } from './db/schema.js';
+import { convertToCurrency } from './services/fx.js';
 
 export interface TrendPoint {
   month: string;
@@ -125,5 +126,56 @@ export function buildOverview(subscriptions: SubscriptionRow[], now = new Date()
             ),
         };
       }),
+  };
+}
+
+export interface CombinedTotal {
+  currency: string;
+  monthlyCommitment: string;
+  annualRunRate: string;
+  /** ECB rate date used for conversion, or null when nothing needed converting. */
+  ratesAsOf: string | null;
+  /** False only when every subscription already shares one currency — an exact figure, not a conversion. */
+  approximate: boolean;
+}
+
+/**
+ * A single across-all-currencies monthly figure, separate from the exact
+ * per-currency breakdown in `currencies`. Converts everything into whichever
+ * currency has the most active subscriptions (same tie-break the mobile
+ * client already used to pick a "primary" currency). Returns null if FX
+ * conversion is needed but the rate service is unavailable — callers should
+ * fall back to showing currencies separately rather than guess.
+ */
+export async function buildCombinedTotal(
+  currencies: ReturnType<typeof buildOverview>['currencies'],
+): Promise<CombinedTotal | null> {
+  if (currencies.length === 0) return null;
+
+  const sorted = [...currencies].sort((a, b) => b.activeCount - a.activeCount);
+  const target = sorted[0]!.currency;
+  if (currencies.length === 1) {
+    const only = sorted[0]!;
+    return {
+      currency: target,
+      monthlyCommitment: only.monthlyCommitment,
+      annualRunRate: only.annualRunRate,
+      ratesAsOf: null,
+      approximate: false,
+    };
+  }
+
+  const converted = await convertToCurrency(
+    currencies.map((c) => ({ currency: c.currency, amount: Number(c.monthlyCommitment) })),
+    target,
+  );
+  if (!converted) return null;
+
+  return {
+    currency: target,
+    monthlyCommitment: money(converted.total),
+    annualRunRate: money(converted.total * 12),
+    ratesAsOf: converted.ratesAsOf,
+    approximate: true,
   };
 }

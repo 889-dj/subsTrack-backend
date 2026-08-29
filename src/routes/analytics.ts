@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { buildOverview, buildSpendTrend } from '../analytics.js';
+import { buildCombinedTotal, buildOverview, buildSpendTrend } from '../analytics.js';
 import { db } from '../db/client.js';
 import { subscriptions } from '../db/schema.js';
 import { currentUser, requireAuth } from '../middleware/auth.js';
@@ -42,7 +42,9 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
         ),
       );
     const result = buildOverview(subs);
-    request.log.info({ userId, subCount: subs.length, result }, 'GET /v1/analytics/overview response');
-    return result;
+    const combined = await buildCombinedTotal(result.currencies);
+    const response = { ...result, combined };
+    request.log.info({ userId, subCount: subs.length, response }, 'GET /v1/analytics/overview response');
+    return response;
   });
 }
