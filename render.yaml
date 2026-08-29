@@ -42,3 +42,5 @@ services:
         value: 1 minute
       - key: DELETION_RETRY_INTERVAL_MS
         value: "60000"
+      - key: RENEWAL_REMINDER_INTERVAL_MS
+        value: "1800000"
