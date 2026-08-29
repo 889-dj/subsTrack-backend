@@ -49,6 +49,12 @@ const forecastQuery = z.object({
 const resumeInput = z.object({
   nextRenewalDate: z.string().datetime({ offset: true }).optional(),
 }).strict();
+const calendarQuery = z.object({
+  month: z
+    .string()
+    .regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Use YYYY-MM.')
+    .optional(),
+}).strict();
 
 type SubscriptionInput = z.infer<typeof subscriptionInput>;
 
@@ -91,6 +97,39 @@ export async function subscriptionRoutes(app: FastifyInstance): Promise<void> {
       .where(and(...conditions))
       .orderBy(asc(subscriptions.nextRenewalDate), asc(subscriptions.name));
     return { items: rows.map(toApi), nextCursor: null };
+  });
+
+  // Every occurrence a monthly/yearly subscription lands on within one
+  // calendar month — not just its single stored nextRenewalDate. Reuses the
+  // same cycle math as forecast-occurrences, just across all subscriptions
+  // for a given month instead of many months for one subscription.
+  app.get('/v1/subscriptions/calendar', { preHandler: requireAuth }, async (request) => {
+    const { month } = calendarQuery.parse(request.query);
+    const now = new Date();
+    const [year, mon] = month
+      ? (month.split('-').map(Number) as [number, number])
+      : [now.getUTCFullYear(), now.getUTCMonth() + 1];
+    const start = new Date(Date.UTC(year, mon - 1, 1));
+    const end = new Date(Date.UTC(year, mon, 1));
+
+    const rows = await db
+      .select()
+      .from(subscriptions)
+      .where(and(scoped(currentUser(request)), eq(subscriptions.status, 'active')));
+
+    const items = rows.flatMap((sub) =>
+      scheduledOccurrences(sub, start, end).map((date) => ({
+        subscriptionId: sub.id,
+        name: sub.name,
+        cost: sub.cost.toFixed(2),
+        currency: sub.currency,
+        logoUrl: sub.logoUrl ?? null,
+        billingCycle: sub.billingCycle,
+        date: date.toISOString(),
+      })),
+    );
+
+    return { month: `${year}-${String(mon).padStart(2, '0')}`, items };
   });
 
   app.post(

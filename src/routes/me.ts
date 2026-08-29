@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { and, eq } from 'drizzle-orm';
+import { z } from 'zod';
 import { db } from '../db/client.js';
 import { entitlements, users } from '../db/schema.js';
 import { sendError } from '../errors.js';
@@ -11,6 +12,11 @@ import {
   isAvatarStorageConfigured,
   uploadAvatar,
 } from '../services/avatar.js';
+import { isValidExpoPushToken } from '../services/push.js';
+
+const pushTokenInput = z.object({
+  token: z.string().trim().min(1),
+}).strict();
 
 export async function meRoutes(app: FastifyInstance): Promise<void> {
   app.get('/v1/me', { preHandler: requireAuth }, async (request, reply) => {
@@ -37,6 +43,7 @@ export async function meRoutes(app: FastifyInstance): Promise<void> {
       id: user.id,
       email: user.email,
       avatarUrl: user.avatarUrl ?? null,
+      pushNotificationsEnabled: Boolean(user.pushToken),
       isPro: entitlementActive || legacyActive,
       proUntil: entitlement?.expiresAt?.toISOString() ?? user.proUntil?.toISOString() ?? null,
       createdAt: user.createdAt.toISOString(),
@@ -91,5 +98,21 @@ export async function meRoutes(app: FastifyInstance): Promise<void> {
     await deleteAvatar(userId);
     await db.update(users).set({ avatarUrl: null, updatedAt: new Date() }).where(eq(users.id, userId));
     return { avatarUrl: null };
+  });
+
+  app.post('/v1/me/push-token', { preHandler: requireAuth }, async (request, reply) => {
+    const { token } = pushTokenInput.parse(request.body);
+    if (!isValidExpoPushToken(token)) {
+      return sendError(request, reply, 400, 'VALIDATION_ERROR', 'Not a valid Expo push token.');
+    }
+    const userId = currentUser(request);
+    await db.update(users).set({ pushToken: token, updatedAt: new Date() }).where(eq(users.id, userId));
+    return { pushNotificationsEnabled: true };
+  });
+
+  app.delete('/v1/me/push-token', { preHandler: requireAuth }, async (request) => {
+    const userId = currentUser(request);
+    await db.update(users).set({ pushToken: null, updatedAt: new Date() }).where(eq(users.id, userId));
+    return { pushNotificationsEnabled: false };
   });
 }

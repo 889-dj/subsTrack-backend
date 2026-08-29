@@ -44,6 +44,9 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_WINDOW: z.string().default('1 minute'),
   DELETION_RETRY_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  // How often to scan for renewals due within 24h and send a push reminder.
+  // Only needs to be shorter than the 24h window, not exact.
+  RENEWAL_REMINDER_INTERVAL_MS: z.coerce.number().int().positive().default(30 * 60_000),
 });
 
 const parsed = envSchema.safeParse(process.env);

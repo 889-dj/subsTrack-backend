@@ -30,6 +30,10 @@ export const users = pgTable('users', {
   // Cloudinary asset public_id is deterministic (substrack/avatars/<userId>),
   // so re-uploads overwrite in place and no separate id needs storing here.
   avatarUrl: text('avatar_url'),
+  // Expo push token for renewal reminders. One per user (single most-recent
+  // device) — good enough for a reminder use case; null means opted out or
+  // never registered.
+  pushToken: text('push_token'),
   proUntil: timestamp('pro_until', { withTimezone: true, mode: 'date' }),
   deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
@@ -61,6 +65,10 @@ export const subscriptions = pgTable(
     // derived on every read — keeps GET fast and independent of a third
     // party's uptime. Null for rows created before this column existed.
     logoUrl: text('logo_url'),
+    // The exact nextRenewalDate value a reminder was already sent for — not
+    // a boolean, so it self-resets whenever the renewal date moves forward
+    // (rollover, pause/resume, edit) without needing an extra job to clear it.
+    reminderSentForRenewal: timestamp('reminder_sent_for_renewal', { withTimezone: true, mode: 'date' }),
     status: text('status', { enum: SUBSCRIPTION_STATUSES }).default('active').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),

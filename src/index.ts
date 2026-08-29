@@ -2,6 +2,7 @@ import { buildApp } from './app.js';
 import { env } from './config.js';
 import { connection } from './db/client.js';
 import { processPendingDeletionJobs } from './services/account-deletion.js';
+import { sendDueRenewalReminders } from './services/renewal-reminders.js';
 
 async function main(): Promise<void> {
   const app = buildApp();
@@ -22,12 +23,20 @@ async function main(): Promise<void> {
   );
   deletionTimer.unref();
 
+  void sendDueRenewalReminders(app.log);
+  const reminderTimer = setInterval(
+    () => void sendDueRenewalReminders(app.log),
+    env.RENEWAL_REMINDER_INTERVAL_MS,
+  );
+  reminderTimer.unref();
+
   // Graceful shutdown — stop accepting connections, let in-flight requests
   // finish, then close the pool so the orchestrator sees a clean exit.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     app.log.info({ signal }, 'Shutting down');
     try {
       clearInterval(deletionTimer);
+      clearInterval(reminderTimer);
       await app.close();
       await connection.end();
       process.exit(0);
