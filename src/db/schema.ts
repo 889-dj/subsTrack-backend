@@ -27,6 +27,9 @@ import { BILLING_CYCLES, SUBSCRIPTION_STATUSES } from '../constants.js';
 export const users = pgTable('users', {
   id: text('id').primaryKey(), // Clerk sub
   email: text('email').notNull(),
+  // Cloudinary asset public_id is deterministic (substrack/avatars/<userId>),
+  // so re-uploads overwrite in place and no separate id needs storing here.
+  avatarUrl: text('avatar_url'),
   proUntil: timestamp('pro_until', { withTimezone: true, mode: 'date' }),
   deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),

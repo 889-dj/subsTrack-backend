@@ -4,6 +4,13 @@ import { db } from '../db/client.js';
 import { entitlements, users } from '../db/schema.js';
 import { sendError } from '../errors.js';
 import { currentUser, requireAuth } from '../middleware/auth.js';
+import {
+  ALLOWED_MIME_TYPES,
+  AVATAR_MAX_BYTES,
+  deleteAvatar,
+  isAvatarStorageConfigured,
+  uploadAvatar,
+} from '../services/avatar.js';
 
 export async function meRoutes(app: FastifyInstance): Promise<void> {
   app.get('/v1/me', { preHandler: requireAuth }, async (request, reply) => {
@@ -29,9 +36,60 @@ export async function meRoutes(app: FastifyInstance): Promise<void> {
     return {
       id: user.id,
       email: user.email,
+      avatarUrl: user.avatarUrl ?? null,
       isPro: entitlementActive || legacyActive,
       proUntil: entitlement?.expiresAt?.toISOString() ?? user.proUntil?.toISOString() ?? null,
       createdAt: user.createdAt.toISOString(),
     };
+  });
+
+  // Multipart upload, capped a little above AVATAR_MAX_BYTES to leave room
+  // for form-data framing overhead — the plugin's own fileSize limit (set at
+  // registration in app.ts) is what actually caps the image bytes.
+  app.post(
+    '/v1/me/avatar',
+    { preHandler: requireAuth, bodyLimit: AVATAR_MAX_BYTES + 1024 * 100 },
+    async (request, reply) => {
+      if (!isAvatarStorageConfigured()) {
+        return sendError(
+          request,
+          reply,
+          503,
+          'INTERNAL_ERROR',
+          'Photo uploads are not configured on this server.',
+        );
+      }
+
+      const userId = currentUser(request);
+      const file = await request.file();
+      if (!file) {
+        return sendError(request, reply, 400, 'VALIDATION_ERROR', 'Attach an image file.');
+      }
+      if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+        return sendError(
+          request,
+          reply,
+          400,
+          'VALIDATION_ERROR',
+          'Only JPEG, PNG, or WEBP images are supported.',
+        );
+      }
+
+      const buffer = await file.toBuffer();
+      if (file.file.truncated) {
+        return sendError(request, reply, 413, 'VALIDATION_ERROR', 'Image is too large (max 5 MB).');
+      }
+
+      const avatarUrl = await uploadAvatar(userId, buffer);
+      await db.update(users).set({ avatarUrl, updatedAt: new Date() }).where(eq(users.id, userId));
+      return { avatarUrl };
+    },
+  );
+
+  app.delete('/v1/me/avatar', { preHandler: requireAuth }, async (request) => {
+    const userId = currentUser(request);
+    await deleteAvatar(userId);
+    await db.update(users).set({ avatarUrl: null, updatedAt: new Date() }).where(eq(users.id, userId));
+    return { avatarUrl: null };
   });
 }

@@ -1,15 +1,18 @@
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { ZodError } from 'zod';
 import { env } from './config.js';
 import { accountRoutes } from './routes/account.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { healthRoutes } from './routes/health.js';
+import { insightsRoutes } from './routes/insights.js';
 import { meRoutes } from './routes/me.js';
 import { revenueCatRoutes } from './routes/revenuecat.js';
 import { subscriptionRoutes } from './routes/subscriptions.js';
 import { webhookRoutes } from './routes/webhooks.js';
+import { AVATAR_MAX_BYTES } from './services/avatar.js';
 
 /**
  * Application assembly. Kept separate from the bootstrap (src/index.ts) so
@@ -43,6 +46,13 @@ export function buildApp(): FastifyInstance {
     global: true,
     max: env.RATE_LIMIT_MAX,
     timeWindow: env.RATE_LIMIT_WINDOW,
+  });
+
+  // Only route that accepts multipart/form-data is POST /v1/me/avatar. The
+  // real size cap is here (files: 1, one field); the route's own bodyLimit
+  // override just needs to be large enough to not reject the request first.
+  app.register(multipart, {
+    limits: { fileSize: AVATAR_MAX_BYTES, files: 1, fields: 0 },
   });
 
   // Parse JSON as a Buffer so webhook signature verification (svix) can read
@@ -109,6 +119,7 @@ export function buildApp(): FastifyInstance {
   app.register(revenueCatRoutes);
   app.register(accountRoutes);
   app.register(analyticsRoutes);
+  app.register(insightsRoutes);
 
   return app;
 }

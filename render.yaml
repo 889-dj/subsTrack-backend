@@ -28,6 +28,12 @@ services:
         sync: false
       - key: LOGO_DEV_TOKEN
         sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: nvidia/nemotron-3-super-120b-a12b:free
+      - key: CLOUDINARY_URL
+        sync: false
       - key: CORS_ORIGINS
         sync: false
       - key: RATE_LIMIT_MAX

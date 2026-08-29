@@ -31,15 +31,18 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/v1/analytics/overview', { preHandler: requireAuth }, async (request) => {
+    const userId = currentUser(request);
     const subs = await db
       .select()
       .from(subscriptions)
       .where(
         and(
-          eq(subscriptions.userId, currentUser(request)),
+          eq(subscriptions.userId, userId),
           eq(subscriptions.status, 'active'),
         ),
       );
-    return buildOverview(subs);
+    const result = buildOverview(subs);
+    request.log.info({ userId, subCount: subs.length, result }, 'GET /v1/analytics/overview response');
+    return result;
   });
 }

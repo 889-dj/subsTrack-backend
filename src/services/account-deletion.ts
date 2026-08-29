@@ -4,6 +4,7 @@ import { env } from '../config.js';
 import { db } from '../db/client.js';
 import { deletionJobs, entitlements, subscriptions, users } from '../db/schema.js';
 import { clerk } from './clerk.js';
+import { deleteAvatar } from './avatar.js';
 
 function isNotFound(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'status' in error && error.status === 404;
@@ -51,6 +52,7 @@ export async function scheduleAccountDeletion(userId: string): Promise<void> {
 
 export async function processDeletionJob(userId: string): Promise<void> {
   try {
+    await deleteAvatar(userId);
     await deleteRevenueCatCustomer(userId);
     if (!clerk) throw new Error('Clerk management client is not configured.');
     try {
