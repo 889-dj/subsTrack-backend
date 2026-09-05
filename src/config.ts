@@ -60,8 +60,12 @@ if (!parsed.success) {
 if (parsed.data.NODE_ENV === 'production') {
   const required = [
     'CLERK_SECRET_KEY',
-    'CLERK_WEBHOOK_SECRET',
-    'REVENUECAT_WEBHOOK_SECRET',
+    // CLERK_WEBHOOK_SECRET and REVENUECAT_WEBHOOK_SECRET are intentionally
+    // not required: ensureLocalUser() lazily reconciles the local user row
+    // on first authenticated request regardless of whether the Clerk
+    // webhook has fired yet, and nothing reads the RevenueCat entitlement
+    // projection its webhook feeds (isPro comes from the SDK on-device).
+    // Add either back once something actually depends on it.
     'REVENUECAT_SECRET_API_KEY',
     'CORS_ORIGINS',
   ] as const;
